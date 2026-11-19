@@ -86,6 +86,9 @@
       </form>
     </div>
 
+    <SamplerStrataPanel v-if="meta.key === 'data_sampler'" :module-key="meta.key" />
+    <DebugCoveragePanel v-if="meta.key === 'debug_trace'" :module-key="meta.key" />
+
     <footer class="page-foot">
       <span>共 {{ total }} 条{{ meta.name }}记录</span>
       <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
@@ -104,6 +107,8 @@ import {
   runAction as applyAction,
 } from '@/api/backend-service'
 import type { EntryRow } from '@/data/types'
+import DebugCoveragePanel from '@/components/DebugCoveragePanel.vue'
+import SamplerStrataPanel from '@/components/SamplerStrataPanel.vue'
 
 const props = defineProps<{ moduleKey: string }>()
 const meta = moduleMeta(props.moduleKey)

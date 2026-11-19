@@ -71,6 +71,49 @@ npm run dev
 | 调试追踪 | `debug_trace` | 调试会话 | 会话名称、目标算子、采样数据 |
 | 聚合落库 | `aggregate_sink` | 聚合任务 | 任务名称、源指标集、聚合粒度 |
 
+## 序号17：分层采样与调试复核
+
+数据采样模块的 `apply_sampling` 是分层采样的唯一入口，调试追踪模块消费同一条
+采样批次，两条链路共用一份分层样本数据和样本报告。
+
+- **每层至少一份**：先给每个非空分层保底 1 条，再按比例分配剩余配额，尾部分层
+  不会再被整体截断清空。
+- **上限不足时两种取舍**：`cap_policy=expand`（默认）把有效上限扩到分层数；
+  `cap_policy=compress` 保持上限不变、允许总量超出上限（`limit_overrun`）并记录。
+  两种策略产出不同结果版本（`issue17.expand.v1` / `issue17.compress.v1`）。
+- **截断台账**：`_sample_report` 记录每层可用/入选/损失、`truncated_strata`、
+  `truncated_total`、`cap_expanded`、`duplicates_dropped`，写入批次时一次性落库。
+- **不重复累计**：事件按 `event_id`（缺失时内容指纹）全局去重；同一策略、同一数据、
+  同一参数生成同一幂等键，重复/并发调用只生效一次；写库失败回滚到采样前版本。
+- **读取源事件**：`read_events_from_source` 按源端名读取事件；源端异常断连/已下线
+  时拒绝读取，避免用不完整数据产出样本报告。
+- **修复台账**：每次批次生效或幂等命中都会记一条台账（`/api/sampling/ledger`），
+  其他模块据此同步更新；策略列表不再混入运行期采样批次（修复详情页显示错位）。
+- **调试复核**：调试会话通过 `batch_id` 绑定批次，`check_sample_coverage` 同时核对
+  样本报告与 `_sampled_data`。任一层缺失、或报告与样本数量对不上，`complete` /
+  `analyze` 返回 409 并阻止生成异常结论，不会把未抽样层当作正常。
+
+接口（固定前缀，注册在 `/api/{module}` 之前）：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/api/sampling/sample` | 执行采样，可带 `method/group_key/ratio/max_samples/cap_policy/idempotency_key` |
+| GET | `/api/sampling/report` | 样本报告（可带 `batch_id`） |
+| GET | `/api/sampling/strata` | 每层入选数量、截断损失、是否扩容 |
+| GET | `/api/sampling/batches` | 最近采样批次 |
+| POST | `/api/sampling/source-events` | 从流式源端读取采样事件（断连/下线时 409） |
+| GET | `/api/sampling/ledger` | 序号17 修复台账（生效版本、幂等命中、回滚基线） |
+| POST | `/api/tracing/attach` | 会话绑定采样批次 |
+| GET | `/api/tracing/coverage` | 分层覆盖复核（`session=`） |
+| POST | `/api/tracing/complete` | 生成异常结论，覆盖缺失时 409 |
+| POST | `/api/tracing/analyze` | 异常模式分析，覆盖缺失时 409 |
+
+前端：数据采样页内嵌「分层样本复核」面板（每层入选数量、截断损失、扩容/压缩提示），
+调试追踪页内嵌「调试异常结论复核」面板（缺失分层高亮、阻止提示、结论明细）。
+采样页面板还可直接生成演示事件并执行分层采样，用来复现“上限不足”的两种取舍。
+
+回归测试：`backend/tests/test_issue17_sampling.py`。
+
 ## 约定
 
 - 全部模块共享`frontend/src/views/WorkbenchView.vue|tsx`和一套资源路由。

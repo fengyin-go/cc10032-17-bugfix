@@ -15,6 +15,10 @@ class BaseModuleService:
     ACTION_RULES: dict[str, str] = {}
     NEGATIVE_ACTIONS: list[str] = []
 
+    def _visible_rows(self) -> list[dict[str, Any]]:
+        """列表展示用的行集合；子类可过滤掉运行期产物（如采样批次）。"""
+        return store.rows(self.MODULE)
+
     def list_entries(
         self,
         *,
@@ -24,7 +28,7 @@ class BaseModuleService:
         page: int = 1,
         size: int = 20,
     ) -> tuple[list[dict[str, Any]], int]:
-        rows = list(store.rows(self.MODULE))
+        rows = list(self._visible_rows())
         for field, expected in (filters or {}).items():
             if field in self.LIST_FIELDS:
                 rows = [

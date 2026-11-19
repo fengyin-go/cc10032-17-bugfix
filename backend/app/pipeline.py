@@ -540,40 +540,77 @@ def sample_and_debug_trace(
     events: list[dict[str, Any]],
     sample_rate: float = 0.1,
 ) -> dict[str, Any]:
-    """数据采样后进行调试追踪。"""
-    sampler = None
-    for row in store.rows("data_sampler"):
-        if row.get("策略名称") == sampler_name:
-            sampler = row
-            break
-    sample_count = max(1, int(len(events) * sample_rate))
-    import random as _random
-    _random.seed(42)
-    sampled = _random.sample(events, min(sample_count, len(events)))
-    trace = {
-        "id": max(
-            (int(r.get("id", 0)) for r in store.rows("debug_trace")), default=0
-        ) + 1,
-        "会话名称": f"trace_{target_operator}_{int(time.time())}",
-        "目标算子": target_operator,
-        "采样数据": str(sampled[0].get("event_id", "")) if sampled else "",
-        "中间结果": str(len(sampled)),
-        "异常标记": "none",
-        "开始时间": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "结束时间": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "status": "运行中",
-        "pending": True,
-        "abnormal": False,
-        "_sampled_events": sampled,
-        "_sample_rate": sample_rate,
-    }
-    store.rows("debug_trace").append(trace)
+    """数据采样后进行调试追踪。
+
+    序号17 修复：链路6 不再单独写一份采样结果，而是走 data_sampler 的分层采样，
+    调试会话绑定到同一个采样批次并复核分层覆盖。重复调用命中同一批次与同一会话，
+    并发/重试只生效一次。
+    """
+    from app.services import service_for
+
+    sampler_service = service_for("data_sampler")
+    tracer_service = service_for("debug_trace")
+    sampler = next(
+        (
+            row for row in store.rows("data_sampler")
+            if row.get("策略名称") == sampler_name and not row.get("_sample_report")
+        ),
+        None,
+    )
+    if sampler is None:
+        return {"ok": False, "error": f"采样策略「{sampler_name}」不存在"}
+
+    # 策略字段在示例数据里是占位值，这里显式给出分层键与上限，保证链路可复核
+    max_samples = max(1, int(len(events) * sample_rate))
+    sampled = sampler_service.apply_sampling(
+        sampler_name,
+        events,
+        idempotency_key=f"pipeline:{target_operator}:{len(events)}:{sample_rate}",
+        method="stratified",
+        group_key="region",
+        ratio=sample_rate,
+        max_samples=max_samples,
+    )
+    if not sampled.get("ok"):
+        return sampled
+
+    session_name = f"trace_{target_operator}"
+    session = next(
+        (row for row in store.rows("debug_trace") if row.get("会话名称") == session_name),
+        None,
+    )
+    if session is None:
+        session = {
+            "id": max(
+                (int(r.get("id", 0)) for r in store.rows("debug_trace")), default=0
+            ) + 1,
+            "会话名称": session_name,
+            "目标算子": target_operator,
+            "采样数据": "",
+            "中间结果": str(sampled["sampled"]),
+            "异常标记": "none",
+            "开始时间": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "结束时间": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "status": "运行中",
+            "pending": True,
+            "abnormal": False,
+            "_sample_rate": sample_rate,
+        }
+        store.rows("debug_trace").append(session)
+    tracer_service.attach_sampling_batch(session_name, sampled["batch_id"])
+    coverage = tracer_service.check_sample_coverage(session_name)
     return {
-        "trace_id": trace["id"],
+        "trace_id": session.get("id"),
         "target": target_operator,
-        "sampled_count": len(sampled),
-        "total_events": len(events),
+        "sampled_count": sampled["sampled"],
+        "total_events": sampled["total"],
         "sample_rate": sample_rate,
+        "batch_id": sampled["batch_id"],
+        "strata_total": sampled["strata_total"],
+        "strata_covered": sampled["strata_covered"],
+        "truncated_strata": sampled["truncated_strata"],
+        "coverage_complete": coverage.get("ok", False),
+        "coverage": coverage,
     }
 
 
